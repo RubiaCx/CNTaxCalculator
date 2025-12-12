@@ -1,5 +1,43 @@
-from typing import List, Dict
+from typing import Union, List, Dict
 import unicodedata
+
+# 城市每月社保上限（养老、失业、医疗）
+CITY_SOCIAL_UPPER_LIMITS = {
+    "北京": {"pension": 2864.88, "unemployment": 179.06, "medical": 716.22},
+    "杭州": {"pension": 1994.4, "unemployment": 124.65, "medical": 498.6},
+    "上海": {"pension": 2984.16, "unemployment": 186.51, "medical": 746.04},
+    "深圳": {"pension": 2200.08, "unemployment": 221.325, "medical": 673.32},  # 养老保险上限未更新仍按27501计算; 职工一档医保
+}
+
+# 城市公积金基数上限 = 城市社保上限 * 公积金比例上限
+CITY_HOUSING_FUND_LIMITS = {
+    "北京": 35811,
+    "杭州": 40694,
+    "上海": 37302,  # 上海2024年社平工资为12434元。故2025年度缴存基数上限据此计算为37302元，上海公积金比例上限7%
+    "深圳": 44265,
+}
+
+# 年度综合所得税率表（保持不变，用于工资薪金计税）
+TAX_RATE_TABLE = [
+    (36000, 0.03, 0),
+    (144000, 0.10, 2520),
+    (300000, 0.20, 16920),
+    (420000, 0.25, 31920),
+    (660000, 0.30, 52920),
+    (960000, 0.35, 85920),
+    (float('inf'), 0.45, 181920),
+]
+
+# 月度税率表（用于年终奖单独计税，按月换算后的综合所得税率表）
+MONTHLY_TAX_RATE_TABLE = [
+    (3000, 0.03, 0),
+    (12000, 0.10, 210),
+    (25000, 0.20, 1410),
+    (35000, 0.25, 2660),
+    (55000, 0.30, 4410),
+    (80000, 0.35, 7160),
+    (float('inf'), 0.45, 15160),
+]
 
 # ================== 城市社保 + 房租专项附加配置 ==================
 CITY_CONFIG: Dict[str, Dict] = {
@@ -27,87 +65,188 @@ CITY_CONFIG: Dict[str, Dict] = {
     }
 }
 
-# ================== 个税基本参数 ==================
-STARTING_POINT_PER_MONTH = 5000  # 起征点（每月 5000）
-# 其他专项附加（子女教育、赡养父母等）这里默认 0，你如果有可以在税式里再加一项
+STARTING_POINT_PER_MONTH = 5000
 
-
-# ================== Offer 配置（含股票预估 & 实习） ==================
+# ================== Offer ==================
 # stock_annual: 假设“当年归属”的股票票面价值（税前，元）
 # stock_flat_rate: 某些公司 粗暴按 20% 直接扣税；其余 None 走累进
 # intern_percent: 实习月薪 = base * intern_percent + allowance；或者 intern_monthly 直接写实习月薪
 COMPANIES: List[Dict] = [
     {
-        "name": "test",
-        "base": 20000,
-        "months": 16,
+        "name": "AAA",
+        "base": 23000,
+        "months": 15,
         "allowance": 0,
-        "sign_on": 100000,
+        "sign_on": 0,
         "city": "Beijing",
         "stock_annual": 0,
         "stock_flat_rate": None,
-        "intern_percent": 0.7,
+    },
+    {
+        "name": "BBB",
+        "base": 20000,
+        "months": 13,
+        "allowance": 0,
+        "sign_on": 0,
+        "city": "Beijing",
+        "stock_annual": 200000,
+        "stock_flat_rate": 0.2,
     },
 ]
 
 
-# ================== 税率表 ==================
 def get_tax_rate(amount: float):
     """年度综合所得税率表（工资全年/股票按年算用这个）"""
-    brackets = [
-        (0, 36000, 0.03, 0),
-        (36000, 144000, 0.10, 2520),
-        (144000, 300000, 0.20, 16920),
-        (300000, 420000, 0.25, 31920),
-        (420000, 660000, 0.30, 52920),
-        (660000, 960000, 0.35, 85920),
-        (960000, float('inf'), 0.45, 181920),
-    ]
-    for lower, upper, rate, qd in brackets:
+    for upper, rate, qd in TAX_RATE_TABLE:
         if amount <= upper:
             return rate, qd
-    return 0.45, 181920
+    return TAX_RATE_TABLE[-1][1], TAX_RATE_TABLE[-1][2]
 
 
 def get_monthly_tax_rate(amount: float):
     """月度税率表（年终奖换算 & 实习按月简单算税用这个）"""
-    brackets = [
-        (0, 3000, 0.03, 0),
-        (3000, 12000, 0.10, 210),
-        (12000, 25000, 0.20, 1410),
-        (25000, 35000, 0.25, 2660),
-        (35000, 55000, 0.30, 4410),
-        (55000, 80000, 0.35, 7160),
-        (80000, float('inf'), 0.45, 15160),
-    ]
-    for lower, upper, rate, qd in brackets:
-        if lower < amount <= upper:
+    for upper, rate, qd in MONTHLY_TAX_RATE_TABLE:
+        if amount <= upper:
             return rate, qd
-    return 0.45, 15160
+    return MONTHLY_TAX_RATE_TABLE[-1][1], MONTHLY_TAX_RATE_TABLE[-1][2]
 
 
 def get_bonus_tax_rate(monthly_amount: float):
-    """年终奖换算后的月度金额用月度税率表"""
     return get_monthly_tax_rate(monthly_amount)
 
 
-# ================== 五险一金 ==================
+def calculate_monthly_details(
+    monthly_salaries: Union[float, List[float]],
+    social_security_bases: Union[float, List[float]],
+    city: str = "北京",
+    five_insurance_rate: float = 0.105,
+    housing_fund_rate: float = 0.12,
+) -> Dict[str, List[Union[float, Dict]]]:
+    """
+    计算本年每月详细薪资数据
+
+    返回：
+        - monthly: 每个月的当月值明细（表格用）
+        - annual: 全年累计值汇总（年度区域用）
+    """
+    if isinstance(monthly_salaries, (int, float)):
+        monthly_salaries = [monthly_salaries] * 12
+    elif isinstance(monthly_salaries, list) and len(monthly_salaries) != 12:
+        raise ValueError("月薪需为单个数值或12个元素的列表")
+
+    if isinstance(social_security_bases, (int, float)):
+        social_security_bases = [social_security_bases] * 12
+    elif isinstance(social_security_bases, list) and len(social_security_bases) != 12:
+        raise ValueError("社保基数需为单个数值或12个元素的列表")
+
+    cumulative_income = 0.0
+    cumulative_social_housing = 0.0
+    cumulative_housing_fund = 0.0
+    cumulative_tax = 0.0
+    monthly_details = []
+    annual_summary: Dict[str, float] = {}
+
+    for month in range(1, 13):
+        current_salary = monthly_salaries[month - 1]
+        current_social_base = social_security_bases[month - 1]
+
+        pension_upper = CITY_SOCIAL_UPPER_LIMITS[city]["pension"]
+        pension = min(current_social_base * 0.08, pension_upper)
+
+        medical_upper = CITY_SOCIAL_UPPER_LIMITS[city]["medical"]
+        medical = min(current_social_base * 0.02, medical_upper)
+
+        unemployment_upper = CITY_SOCIAL_UPPER_LIMITS[city]["unemployment"]
+        unemployment = min(current_social_base * 0.005, unemployment_upper)
+
+        social_total = pension + medical + unemployment
+
+        housing_limit = CITY_HOUSING_FUND_LIMITS.get(city, float('inf'))
+        housing_fund = min(current_social_base, housing_limit) * housing_fund_rate
+
+        total_social_housing = social_total + housing_fund
+
+        cumulative_income += current_salary
+        cumulative_social_housing += total_social_housing
+        cumulative_housing_fund += housing_fund
+
+        cumulative_taxable_income = cumulative_income - 5000 * month - cumulative_social_housing
+        cumulative_monthly_tax = 0.0
+        for limit, rate, deduction in TAX_RATE_TABLE:
+            if cumulative_taxable_income <= limit:
+                cumulative_monthly_tax = cumulative_taxable_income * rate - deduction
+                break
+        current_month_tax = cumulative_monthly_tax - cumulative_tax
+        current_month_tax = max(current_month_tax, 0.0)
+        cumulative_tax = cumulative_monthly_tax
+
+        takehome = current_salary - social_total - housing_fund - current_month_tax
+        takehome = max(takehome, 0.0)
+
+        monthly_details.append({
+            "month": month,
+            "pre_tax_income": round(current_salary, 2),
+            "pension": round(pension, 2),
+            "medical": round(medical, 2),
+            "unemployment": round(unemployment, 2),
+            "housing_fund": round(housing_fund, 2),
+            "taxable_income": round(cumulative_taxable_income, 2),
+            "current_tax": round(current_month_tax, 2),
+            "takehome": round(takehome, 2),
+        })
+
+    total_pre_tax = round(cumulative_income, 2)
+    total_housing_fund = round(cumulative_housing_fund, 2)
+    total_tax = round(cumulative_tax, 2)
+    total_takehome = round(cumulative_income - cumulative_social_housing - cumulative_tax, 2)
+    total_takehome_with_housing = total_takehome + total_housing_fund * 2
+
+    annual_summary = {
+        "total_pre_tax": total_pre_tax,
+        "total_housing_fund": total_housing_fund,
+        "total_tax": total_tax,
+        "total_takehome": total_takehome,
+        "total_takehome_with_housing": total_takehome_with_housing,
+    }
+
+    return {"monthly": monthly_details, "annual": annual_summary}
+
+
+def calculate_year_end_bonus(year_end_bonus: float) -> Dict[str, float]:
+    """计算年终奖单独计税的个税、税率及税后金额"""
+    if year_end_bonus <= 0:
+        raise ValueError("年终奖金额必须大于0")
+
+    monthly_income = year_end_bonus / 12
+    tax_rate = MONTHLY_TAX_RATE_TABLE[-1][1]
+    quick_deduction = MONTHLY_TAX_RATE_TABLE[-1][2]
+    for limit, rate, deduction in MONTHLY_TAX_RATE_TABLE:
+        if monthly_income <= limit:
+            tax_rate = rate
+            quick_deduction = deduction
+            break
+
+    bonus_tax = year_end_bonus * tax_rate - quick_deduction
+    bonus_after_tax = year_end_bonus - bonus_tax
+
+    return {
+        "tax": round(bonus_tax, 2),
+        "after_tax": round(bonus_after_tax, 2),
+        "tax_rate": round(tax_rate * 100, 2),
+    }
+
+
 def calc_insurance(income: float, city: str) -> float:
-    """计算每月个人五险一金缴纳额（按 base+补贴 做基数，不含签字费）"""
     cfg = CITY_CONFIG.get(city, CITY_CONFIG['Beijing'])
     base_sb = max(min(income, cfg['shebao_cap']), cfg['shebao_min'])
     base_gjj = max(min(income, cfg['gongjijin_cap']), cfg['shebao_min'])
     deduction = (
-        base_sb * (cfg['rate_pension'] + cfg['rate_unemploy'] + cfg['rate_medical'])
-        + cfg['medical_fixed']
-        + base_gjj * cfg['rate_housing']
+        base_sb * (cfg['rate_pension'] + cfg['rate_unemploy'] + cfg['rate_medical']) + cfg['medical_fixed'] + base_gjj * cfg['rate_housing']
     )
     return deduction
 
 
-# ================== 打印对齐工具 ==================
 def display_width(text: str) -> int:
-    """计算包含中英文的显示宽度（全角按 2）"""
     width = 0
     for ch in str(text):
         width += 2 if unicodedata.east_asian_width(ch) in ('F', 'W') else 1
@@ -115,7 +254,6 @@ def display_width(text: str) -> int:
 
 
 def pad(text: str, width: int, align: str = 'left') -> str:
-    """按显示宽度补空格对齐"""
     cur = display_width(text)
     if cur >= width:
         return text
@@ -125,7 +263,6 @@ def pad(text: str, width: int, align: str = 'left') -> str:
     return text + spaces
 
 
-# ================== 全职 Offer 计算 ==================
 def run_calculation(company_data: Dict) -> Dict:
     base = company_data['base']
     months = company_data['months']
@@ -136,16 +273,12 @@ def run_calculation(company_data: Dict) -> Dict:
     stock_flat_rate = company_data.get('stock_flat_rate')
 
     monthly_fixed = base + allowance
-
-    # base 月数 > 12 的部分当作年终奖
     bonus_months = max(0, months - 12)
     year_end_bonus = base * bonus_months
 
-    # ---- 股票 / 期权（首年归属部分，统一按 20% 计税） ----
     stock_tax = 0.0
     stock_net = 0.0
     if stock_annual > 0:
-        # 期权统一按 20% 税率粗略估算
         stock_tax = stock_annual * 0.20
         stock_net = stock_annual - stock_tax
 
@@ -161,6 +294,8 @@ def run_calculation(company_data: Dict) -> Dict:
     cumulative_income_net = 0.0
     cumulative_taxable = 0.0
     cumulative_tax_paid = 0.0
+    cumulative_social = 0.0
+    cumulative_housing = 0.0
     monthly_nets: List[float] = []
     first_month_net = 0.0
 
@@ -174,7 +309,12 @@ def run_calculation(company_data: Dict) -> Dict:
             current_income += sign_on
 
         # 五险一金按固定月收入算，不把签字费算进基数
-        insurance = calc_insurance(monthly_fixed, city)
+        cfg = CITY_CONFIG.get(city, CITY_CONFIG['Beijing'])
+        base_sb = max(min(monthly_fixed, cfg['shebao_cap']), cfg['shebao_min'])
+        base_gjj = max(min(monthly_fixed, cfg['gongjijin_cap']), cfg['shebao_min'])
+        housing_part = base_gjj * cfg['rate_housing']
+        social_part = base_sb * (cfg['rate_pension'] + cfg['rate_unemploy'] + cfg['rate_medical']) + cfg['medical_fixed']
+        insurance = social_part + housing_part
 
         # 专项附加只有房租：起征点 + 房租专项
         taxable = max(0, current_income - STARTING_POINT_PER_MONTH - rent_deduction - insurance)
@@ -191,6 +331,8 @@ def run_calculation(company_data: Dict) -> Dict:
 
         cumulative_tax_paid += cur_tax
         cumulative_income_net += net
+        cumulative_social += social_part
+        cumulative_housing += housing_part
         monthly_nets.append(net)
 
     monthly_max = max(monthly_nets) if monthly_nets else 0.0
@@ -206,6 +348,9 @@ def run_calculation(company_data: Dict) -> Dict:
         "first_month_w": first_month_net / 10000,
         "monthly_min_w": monthly_min / 10000,
         "monthly_max_w": monthly_max / 10000,
+        "annual_tax_w": cumulative_tax_paid,
+        "annual_social_w": cumulative_social,
+        "annual_housing_w": cumulative_housing,
         "total_net_w": total_net / 10000,
     }
 
@@ -219,18 +364,15 @@ def run_internship_calculation(company_data: Dict, months: int = 3) -> Dict | No
     """
     city = company_data['city']
 
-    # 优先使用 intern_monthly；否则按 intern_percent * base + allowance
     intern_monthly = company_data.get('intern_monthly')
     if intern_monthly is None:
         intern_percent = company_data.get('intern_percent')
         if intern_percent is None:
-            # 没写实习信息，就认为没这个实习 offer
             return None
         intern_monthly = company_data['base'] * intern_percent + company_data.get('allowance', 0)
 
     rent_deduction = CITY_CONFIG.get(city, CITY_CONFIG['Beijing']).get('rent_deduction', 0)
 
-    # 实习不缴社保，只有起征点 + 房租专项
     taxable_per_month = max(0, intern_monthly - STARTING_POINT_PER_MONTH - rent_deduction)
 
     monthly_nets: List[float] = []
@@ -267,23 +409,25 @@ def run_internship_calculation(company_data: Dict, months: int = 3) -> Dict | No
     }
 
 
-# ================== 表头定义 ==================
 FULLTIME_COLUMNS = [
-    {"key": "name",              "title": "公司",        "width": 16, "align": "left"},
+    {"key": "name",              "title": "公司",       "width": 16, "align": "left"},
     {"key": "total_gross_w",     "title": "税前总包",    "width": 10, "align": "right"},
     {"key": "stock_gross_w",     "title": "税前股票",    "width": 10, "align": "right"},
     {"key": "salary_net_w",      "title": "工资到手",    "width": 10, "align": "right"},
     {"key": "first_month_w",     "title": "首月到手",    "width": 12, "align": "right"},
     {"key": "monthly_min_w",     "title": "月到手最小",   "width": 12, "align": "right"},
     {"key": "monthly_max_w",     "title": "月到手最大",   "width": 12, "align": "right"},
-    {"key": "stock_net_w",       "title": "股票/期权到手",    "width": 12, "align": "right"},
+    {"key": "stock_net_w",       "title": "股票/期权到手", "width": 12, "align": "right"},
+    {"key": "annual_tax_w",      "title": "年个税",      "width": 10, "align": "right"},
+    {"key": "annual_social_w",   "title": "年社保",      "width": 10, "align": "right"},
+    {"key": "annual_housing_w",  "title": "年公积金",     "width": 10, "align": "right"},
     # {"key": "intern_net_month_w","title": "实习月均到手", "width": 12, "align": "right"},
     {"key": "total_net_w",       "title": "总到手",      "width": 10, "align": "right"},
 ]
 
 INTERNSHIP_COLUMNS = [
-    {"key": "name",                 "title": "公司",       "width": 16, "align": "left"},
-    {"key": "intern_city",          "title": "城市",       "width": 8,  "align": "left"},
+    {"key": "name",                 "title": "公司",      "width": 16, "align": "left"},
+    {"key": "intern_city",          "title": "城市",      "width": 8,  "align": "left"},
     {"key": "intern_gross_month_w", "title": "实习月薪",   "width": 12, "align": "right"},
     {"key": "intern_net_month_w",   "title": "实习月到手", "width": 12, "align": "right"},
     {"key": "intern_months",        "title": "实习月数",   "width": 8,  "align": "right"},
@@ -292,9 +436,7 @@ INTERNSHIP_COLUMNS = [
 ]
 
 
-# ================== 主程序 ==================
 def main():
-    # -------- 全职 Offer 表 --------
     header = " | ".join(
         pad(col["title"], col["width"], col["align"])
         for col in FULLTIME_COLUMNS
@@ -314,20 +456,16 @@ def main():
             res["intern_net_month_w"] = 0.0
         results.append(res)
 
-    # 找首月到手最大值，做 1st 标记
-    global_first_month_max = max(r["first_month_w"] for r in results) if results else 0.0
-
     for res in results:
         row_items = []
         for col in FULLTIME_COLUMNS:
             key = col["key"]
             if key == "name":
                 value = res[key]
+            elif key in {"annual_tax_w", "annual_social_w", "annual_housing_w"}:
+                value = f"{res[key]:.0f}"
             else:
-                if key == "first_month_w" and abs(res[key] - global_first_month_max) < 1e-6:
-                    value = f"{res[key]:.1f} 1st"
-                else:
-                    value = f"{res[key]:.1f}"
+                value = f"{res[key]:.1f}"
             row_items.append(pad(value, col["width"], col["align"]))
         print(" | ".join(row_items))
 
