@@ -1,20 +1,83 @@
 from typing import Union, List, Dict
 import unicodedata
 
-# 城市每月社保上限（养老、失业、医疗）
-CITY_SOCIAL_UPPER_LIMITS = {
-    "北京": {"pension": 2864.88, "unemployment": 179.06, "medical": 716.22},
-    "杭州": {"pension": 1994.4, "unemployment": 124.65, "medical": 498.6},
-    "上海": {"pension": 2984.16, "unemployment": 186.51, "medical": 746.04},
-    "深圳": {"pension": 2200.08, "unemployment": 221.325, "medical": 673.32},  # 养老保险上限未更新仍按27501计算; 职工一档医保
+# ================== 城市配置 (社保/公积金/税率) ==================
+# 包含：社保公积金基数上限、各项费率、固定附加费、以及部分险种的绝对值上限（如有）
+CITY_CONFIG: Dict[str, Dict] = {
+    'Beijing': {
+        'name_cn': '北京',
+        'shebao_cap': 35283,    # 社保基数上限
+        'shebao_min': 6821,     # 社保基数下限
+        'gongjijin_cap': 35283, # 公积金基数上限
+        'rate_pension': 0.08,   # 养老个人 8%
+        'rate_medical': 0.02,   # 医疗个人 2%
+        'medical_fixed': 0,     # 医疗附加
+        'rate_unemploy': 0.002, # 失业个人 0.2%
+        'limit_unemploy': 70.57,# 失业保险个人缴纳绝对上限
+        'rate_housing': 0.12,   # 公积金个人 12%
+        'corp_rate_pension': 0.16,
+        'corp_rate_medical': 0.088,
+        'corp_rate_unemploy': 0.005,
+        'corp_rate_injury': 0.004,
+        'corp_rate_maternity': 0.0,
+        'corp_rate_housing': 0.12,
+        'rent_deduction': 0     # 房租专项附加
+    },
+    'Shanghai': {
+        'name_cn': '上海',
+        'shebao_cap': 36549,
+        'shebao_min': 7310,
+        'gongjijin_cap': 36549, # 2024基数
+        'rate_pension': 0.08,
+        'rate_medical': 0.02,
+        'medical_fixed': 0,
+        'rate_unemploy': 0.005,
+        'limit_unemploy': 186.51,
+        'rate_housing': 0.12,
+        'corp_rate_pension': 0.16,
+        'corp_rate_medical': 0.085,
+        'corp_rate_unemploy': 0.005,
+        'corp_rate_injury': 0.0026,
+        'corp_rate_maternity': 0.0,
+        'corp_rate_housing': 0.12,
+        'rent_deduction': 0
+    },
+    'Hangzhou': {
+        'name_cn': '杭州',
+        'shebao_cap': 24060,
+        'shebao_min': 4462,
+        'gongjijin_cap': 38390,
+        'rate_pension': 0.08,
+        'rate_medical': 0.02,
+        'medical_fixed': 0,
+        'rate_unemploy': 0.005,
+        'limit_unemploy': 120.3,
+        'rate_housing': 0.12,
+        'corp_rate_pension': 0.14,
+        'corp_rate_medical': 0.099,
+        'corp_rate_unemploy': 0.005,
+        'corp_rate_injury': 0.002,
+        'corp_rate_maternity': 0.0,
+        'corp_rate_housing': 0.12,
+        'rent_deduction': 0
+    }
 }
 
-# 城市公积金基数上限 = 城市社保上限 * 公积金比例上限
-CITY_HOUSING_FUND_LIMITS = {
-    "北京": 35811,
-    "杭州": 40694,
-    "上海": 37302,  # 上海2024年社平工资为12434元。故2025年度缴存基数上限据此计算为37302元，上海公积金比例上限7%
-    "深圳": 44265,
+# 城市别名映射 -> 统一转为 CITY_CONFIG 的 key
+CITY_ALIAS_MAP = {
+    "北京": "Beijing",
+    "Beijing": "Beijing",
+    "BJ": "Beijing",
+    "上海": "Shanghai",
+    "Shanghai": "Shanghai",
+    "SH": "Shanghai",
+    "杭州": "Hangzhou",
+    "Hangzhou": "Hangzhou",
+    "HZ": "Hangzhou",
+    "杭 州": "Hangzhou",
+    "深圳": "Shenzhen",
+    "Shenzhen": "Shenzhen",
+    "SZ": "Shenzhen",
 }
 
 # 年度综合所得税率表（保持不变，用于工资薪金计税）
@@ -39,60 +102,57 @@ MONTHLY_TAX_RATE_TABLE = [
     (float('inf'), 0.45, 15160),
 ]
 
-# ================== 城市社保 + 房租专项附加配置 ==================
-CITY_CONFIG: Dict[str, Dict] = {
-    'Beijing': {
-        'shebao_cap': 35283,    # 社保缴费上限
-        'shebao_min': 6821,     # 社保缴费下限
-        'gongjijin_cap': 35283, # 公积金缴费上限
-        'rate_pension': 0.08,   # 养老个人
-        'rate_medical': 0.02,   # 医疗个人
-        'medical_fixed': 3,     # 医疗 3 元大病统筹
-        'rate_unemploy': 0.005, # 失业个人
-        'rate_housing': 0.12,   # 公积金个人
-        'rent_deduction': 1500  # 房租专项附加，单位：元/月
-    },
-    'Hangzhou': {
-        'shebao_cap': 24930,
-        'shebao_min': 4462,
-        'gongjijin_cap': 39527,
-        'rate_pension': 0.08,
-        'rate_medical': 0.02,
-        'medical_fixed': 0,
-        'rate_unemploy': 0.005,
-        'rate_housing': 0.12,
-        'rent_deduction': 1500  # 房租专项附加，单位：元/月
-    }
-}
-
 STARTING_POINT_PER_MONTH = 5000
 
 # ================== Offer ==================
-# stock_annual: 假设“当年归属”的股票票面价值（税前，元）
-# stock_flat_rate: 某些公司 粗暴按 20% 直接扣税；其余 None 走累进
-# intern_percent: 实习月薪 = base * intern_percent + allowance；或者 intern_monthly 直接写实习月薪
 COMPANIES: List[Dict] = [
     {
-        "name": "AAA",
-        "base": 23000,
-        "months": 15,
+        "name": "BJ",
+        "base": 40000,
+        "months": 13,
         "allowance": 0,
         "sign_on": 0,
         "city": "Beijing",
         "stock_annual": 0,
         "stock_flat_rate": None,
     },
-    {
-        "name": "BBB",
-        "base": 20000,
+     {
+        "name": "SH",
+        "base": 40000,
         "months": 13,
         "allowance": 0,
         "sign_on": 0,
-        "city": "Beijing",
-        "stock_annual": 200000,
-        "stock_flat_rate": 0.2,
+        "city": "Shanghai",
+        "stock_annual": 0,
+        "stock_flat_rate": None,
+    },
+     {
+        "name": "SZ",
+        "base": 40000,
+        "months": 13,
+        "allowance": 0,
+        "sign_on": 0,
+        "city": "Shenzhen",
+        "stock_annual": 0,
+        "stock_flat_rate": None,
+    },
+     {
+        "name": "HZ",
+        "base": 40000,
+        "months": 13,
+        "allowance": 0,
+        "sign_on": 0,
+        "city": "Hangzhou",
+        "stock_annual": 0,
+        "stock_flat_rate": None,
     },
 ]
+
+
+def resolve_city_config(city_name: str) -> Dict:
+    """根据城市名/别名获取配置"""
+    key = CITY_ALIAS_MAP.get(city_name, "Beijing")
+    return CITY_CONFIG.get(key, CITY_CONFIG["Beijing"])
 
 
 def get_tax_rate(amount: float):
@@ -122,13 +182,8 @@ def calculate_monthly_details(
     five_insurance_rate: float = 0.105,
     housing_fund_rate: float = 0.12,
 ) -> Dict[str, List[Union[float, Dict]]]:
-    """
-    计算本年每月详细薪资数据
+    cfg = resolve_city_config(city)
 
-    返回：
-        - monthly: 每个月的当月值明细（表格用）
-        - annual: 全年累计值汇总（年度区域用）
-    """
     if isinstance(monthly_salaries, (int, float)):
         monthly_salaries = [monthly_salaries] * 12
     elif isinstance(monthly_salaries, list) and len(monthly_salaries) != 12:
@@ -139,10 +194,22 @@ def calculate_monthly_details(
     elif isinstance(social_security_bases, list) and len(social_security_bases) != 12:
         raise ValueError("社保基数需为单个数值或12个元素的列表")
 
+    # 基数按城市上下限收敛
+    social_security_bases = [
+        max(min(b, cfg["shebao_cap"]), cfg["shebao_min"]) for b in social_security_bases
+    ]
+
     cumulative_income = 0.0
     cumulative_social_housing = 0.0
     cumulative_housing_fund = 0.0
     cumulative_tax = 0.0
+    cumulative_personal_social = 0.0
+    cumulative_company_social = 0.0
+    cumulative_personal_housing = 0.0
+    cumulative_company_housing = 0.0
+    cumulative_pension = 0.0
+    cumulative_medical = 0.0
+    cumulative_unemployment = 0.0
     monthly_details = []
     annual_summary: Dict[str, float] = {}
 
@@ -150,25 +217,42 @@ def calculate_monthly_details(
         current_salary = monthly_salaries[month - 1]
         current_social_base = social_security_bases[month - 1]
 
-        pension_upper = CITY_SOCIAL_UPPER_LIMITS[city]["pension"]
-        pension = min(current_social_base * 0.08, pension_upper)
+        pension = current_social_base * cfg["rate_pension"]
+        corp_pension = current_social_base * cfg["corp_rate_pension"]
 
-        medical_upper = CITY_SOCIAL_UPPER_LIMITS[city]["medical"]
-        medical = min(current_social_base * 0.02, medical_upper)
+        medical = current_social_base * cfg["rate_medical"] + cfg["medical_fixed"]
+        corp_medical = current_social_base * cfg["corp_rate_medical"]
 
-        unemployment_upper = CITY_SOCIAL_UPPER_LIMITS[city]["unemployment"]
-        unemployment = min(current_social_base * 0.005, unemployment_upper)
+        # 失业保险可能存在单独的金额上限
+        unemployment_limit = cfg.get("limit_unemploy", float("inf"))
+        unemployment = min(current_social_base * cfg["rate_unemploy"], unemployment_limit)
+        corp_unemployment = min(current_social_base * cfg["corp_rate_unemploy"], unemployment_limit)
+        
+        corp_injury = current_social_base * cfg.get("corp_rate_injury", 0.0)
+        corp_maternity = current_social_base * cfg.get("corp_rate_maternity", 0.0)
 
         social_total = pension + medical + unemployment
+        corp_social_total = corp_pension + corp_medical + corp_unemployment + corp_injury + corp_maternity
 
-        housing_limit = CITY_HOUSING_FUND_LIMITS.get(city, float('inf'))
-        housing_fund = min(current_social_base, housing_limit) * housing_fund_rate
+        # 公积金基数上限可能独立
+        housing_limit = cfg.get("gongjijin_cap", cfg["shebao_cap"])
+        housing_base = min(current_social_base, housing_limit)
+        
+        housing_fund = housing_base * housing_fund_rate
+        corp_housing_fund = housing_base * cfg.get("corp_rate_housing", housing_fund_rate)
 
         total_social_housing = social_total + housing_fund
 
         cumulative_income += current_salary
         cumulative_social_housing += total_social_housing
         cumulative_housing_fund += housing_fund
+        cumulative_personal_social += social_total
+        cumulative_company_social += corp_social_total
+        cumulative_personal_housing += housing_fund
+        cumulative_company_housing += corp_housing_fund
+        cumulative_pension += (pension + corp_pension)
+        cumulative_medical += (medical + corp_medical)
+        cumulative_unemployment += (unemployment + corp_unemployment)
 
         cumulative_taxable_income = cumulative_income - 5000 * month - cumulative_social_housing
         cumulative_monthly_tax = 0.0
@@ -237,7 +321,7 @@ def calculate_year_end_bonus(year_end_bonus: float) -> Dict[str, float]:
 
 
 def calc_insurance(income: float, city: str) -> float:
-    cfg = CITY_CONFIG.get(city, CITY_CONFIG['Beijing'])
+    cfg = resolve_city_config(city)
     base_sb = max(min(income, cfg['shebao_cap']), cfg['shebao_min'])
     base_gjj = max(min(income, cfg['gongjijin_cap']), cfg['shebao_min'])
     deduction = (
@@ -269,6 +353,7 @@ def run_calculation(company_data: Dict) -> Dict:
     allowance = company_data['allowance']
     sign_on = company_data['sign_on']
     city = company_data['city']
+    cfg = resolve_city_config(city)
     stock_annual = company_data.get('stock_annual', 0)
     stock_flat_rate = company_data.get('stock_flat_rate')
 
@@ -294,12 +379,17 @@ def run_calculation(company_data: Dict) -> Dict:
     cumulative_income_net = 0.0
     cumulative_taxable = 0.0
     cumulative_tax_paid = 0.0
-    cumulative_social = 0.0
-    cumulative_housing = 0.0
+    cumulative_social_personal = 0.0
+    cumulative_social_company = 0.0
+    cumulative_housing_personal = 0.0
+    cumulative_housing_company = 0.0
+    cumulative_pension = 0.0
+    cumulative_medical = 0.0
+    cumulative_unemployment = 0.0
     monthly_nets: List[float] = []
     first_month_net = 0.0
 
-    rent_deduction = CITY_CONFIG.get(city, CITY_CONFIG['Beijing']).get('rent_deduction', 0)
+    rent_deduction = cfg.get('rent_deduction', 0)
 
     for m in range(1, 13):
         # 每月固定收入
@@ -309,11 +399,30 @@ def run_calculation(company_data: Dict) -> Dict:
             current_income += sign_on
 
         # 五险一金按固定月收入算，不把签字费算进基数
-        cfg = CITY_CONFIG.get(city, CITY_CONFIG['Beijing'])
         base_sb = max(min(monthly_fixed, cfg['shebao_cap']), cfg['shebao_min'])
-        base_gjj = max(min(monthly_fixed, cfg['gongjijin_cap']), cfg['shebao_min'])
+        
+        # 公积金基数上限
+        housing_limit = cfg.get("gongjijin_cap", cfg["shebao_cap"])
+        base_gjj = max(min(monthly_fixed, housing_limit), cfg['shebao_min'])
+
+        pension = base_sb * cfg['rate_pension']
+        corp_pension = base_sb * cfg['corp_rate_pension']
+
+        medical = base_sb * cfg['rate_medical'] + cfg['medical_fixed']
+        corp_medical = base_sb * cfg['corp_rate_medical']
+
+        unemployment_limit = cfg.get("limit_unemploy", float("inf"))
+        unemployment = min(base_sb * cfg['rate_unemploy'], unemployment_limit)
+        corp_unemployment = min(base_sb * cfg['corp_rate_unemploy'], unemployment_limit)
+        
+        corp_injury = base_sb * cfg.get('corp_rate_injury', 0.0)
+        corp_maternity = base_sb * cfg.get('corp_rate_maternity', 0.0)
+
         housing_part = base_gjj * cfg['rate_housing']
-        social_part = base_sb * (cfg['rate_pension'] + cfg['rate_unemploy'] + cfg['rate_medical']) + cfg['medical_fixed']
+        corp_housing_part = base_gjj * cfg.get('corp_rate_housing', cfg['rate_housing'])
+
+        social_part = pension + medical + unemployment
+        corp_social_part = corp_pension + corp_medical + corp_unemployment + corp_injury + corp_maternity
         insurance = social_part + housing_part
 
         # 专项附加只有房租：起征点 + 房租专项
@@ -331,8 +440,13 @@ def run_calculation(company_data: Dict) -> Dict:
 
         cumulative_tax_paid += cur_tax
         cumulative_income_net += net
-        cumulative_social += social_part
-        cumulative_housing += housing_part
+        cumulative_social_personal += social_part
+        cumulative_social_company += corp_social_part
+        cumulative_housing_personal += housing_part
+        cumulative_housing_company += corp_housing_part
+        cumulative_pension += pension + corp_pension
+        cumulative_medical += medical + corp_medical
+        cumulative_unemployment += unemployment + corp_unemployment
         monthly_nets.append(net)
 
     monthly_max = max(monthly_nets) if monthly_nets else 0.0
@@ -348,9 +462,15 @@ def run_calculation(company_data: Dict) -> Dict:
         "first_month_w": first_month_net / 10000,
         "monthly_min_w": monthly_min / 10000,
         "monthly_max_w": monthly_max / 10000,
-        "annual_tax_w": cumulative_tax_paid,
-        "annual_social_w": cumulative_social,
-        "annual_housing_w": cumulative_housing,
+        "monthly_range_w": f"{monthly_min/10000:.1f}~{monthly_max/10000:.1f}",
+        "annual_tax": cumulative_tax_paid + bonus_tax + stock_tax,
+        "annual_social": cumulative_social_personal + cumulative_social_company,
+        "annual_social_personal": cumulative_social_personal,
+        "annual_housing": cumulative_housing_personal + cumulative_housing_company,
+        "annual_housing_personal": cumulative_housing_personal,
+        "pension_total": cumulative_pension,
+        "medical_total": cumulative_medical,
+        "unemployment_total": cumulative_unemployment,
         "total_net_w": total_net / 10000,
     }
 
@@ -363,6 +483,8 @@ def run_internship_calculation(company_data: Dict, months: int = 3) -> Dict | No
       - 税按“工资薪金”用月度税率简单算（不按全年累计）。
     """
     city = company_data['city']
+    # 实习逻辑中也需要获取城市配置来确定房租扣除（如有）
+    cfg = resolve_city_config(city)
 
     intern_monthly = company_data.get('intern_monthly')
     if intern_monthly is None:
@@ -371,7 +493,7 @@ def run_internship_calculation(company_data: Dict, months: int = 3) -> Dict | No
             return None
         intern_monthly = company_data['base'] * intern_percent + company_data.get('allowance', 0)
 
-    rent_deduction = CITY_CONFIG.get(city, CITY_CONFIG['Beijing']).get('rent_deduction', 0)
+    rent_deduction = cfg.get('rent_deduction', 0)
 
     taxable_per_month = max(0, intern_monthly - STARTING_POINT_PER_MONTH - rent_deduction)
 
@@ -410,19 +532,21 @@ def run_internship_calculation(company_data: Dict, months: int = 3) -> Dict | No
 
 
 FULLTIME_COLUMNS = [
-    {"key": "name",              "title": "公司",       "width": 16, "align": "left"},
-    {"key": "total_gross_w",     "title": "税前总包",    "width": 10, "align": "right"},
-    {"key": "stock_gross_w",     "title": "税前股票",    "width": 10, "align": "right"},
-    {"key": "salary_net_w",      "title": "工资到手",    "width": 10, "align": "right"},
-    {"key": "first_month_w",     "title": "首月到手",    "width": 12, "align": "right"},
-    {"key": "monthly_min_w",     "title": "月到手最小",   "width": 12, "align": "right"},
-    {"key": "monthly_max_w",     "title": "月到手最大",   "width": 12, "align": "right"},
-    {"key": "stock_net_w",       "title": "股票/期权到手", "width": 12, "align": "right"},
-    {"key": "annual_tax_w",      "title": "年个税",      "width": 10, "align": "right"},
-    {"key": "annual_social_w",   "title": "年社保",      "width": 10, "align": "right"},
-    {"key": "annual_housing_w",  "title": "年公积金",     "width": 10, "align": "right"},
-    # {"key": "intern_net_month_w","title": "实习月均到手", "width": 12, "align": "right"},
-    {"key": "total_net_w",       "title": "总到手",      "width": 10, "align": "right"},
+    {"key": "name",              "title": "公司",         "width": 12, "align": "left"},
+    {"key": "total_gross_w",     "title": "税前总包(万)",  "width": 12, "align": "right"},
+    {"key": "stock_gross_w",     "title": "税前股票(万)",  "width": 12, "align": "right"},
+    {"key": "salary_net_w",      "title": "工资到手(万)",  "width": 12, "align": "right"},
+    {"key": "total_net_w",       "title": "总到手(万)",    "width": 10, "align": "right"},
+    {"key": "monthly_range_w",   "title": "月到手范围(万)", "width": 14, "align": "right"},
+    {"key": "stock_net_w",       "title": "股票到手(万)",  "width": 12, "align": "right"},
+    {"key": "annual_tax",        "title": "年个税",        "width": 10, "align": "right"},
+    {"key": "annual_social",     "title": "年社保(双边)",   "width": 12, "align": "right"},
+    {"key": "annual_social_personal", "title": "个人社保",   "width": 10, "align": "right"},
+    {"key": "annual_housing",    "title": "年公积金(双边)", "width": 14, "align": "right"},
+    {"key": "annual_housing_personal", "title": "个人公积金", "width": 12, "align": "right"},
+    {"key": "pension_total",     "title": "养老(双边)",     "width": 12, "align": "right"},
+    {"key": "medical_total",     "title": "医疗(双边)",     "width": 12, "align": "right"},
+    {"key": "unemployment_total","title": "失业(双边)",     "width": 12, "align": "right"},
 ]
 
 INTERNSHIP_COLUMNS = [
@@ -462,10 +586,12 @@ def main():
             key = col["key"]
             if key == "name":
                 value = res[key]
-            elif key in {"annual_tax_w", "annual_social_w", "annual_housing_w"}:
-                value = f"{res[key]:.0f}"
-            else:
+            elif key == "monthly_range_w":
+                value = res[key]
+            elif key in {"total_gross_w", "stock_gross_w", "salary_net_w", "total_net_w", "stock_net_w"}:
                 value = f"{res[key]:.1f}"
+            else:
+                value = f"{res[key]:.0f}"
             row_items.append(pad(value, col["width"], col["align"]))
         print(" | ".join(row_items))
 
